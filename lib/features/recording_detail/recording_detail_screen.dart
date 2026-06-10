@@ -37,8 +37,6 @@ class _RecordingDetailScreenState
 
   @override
   void dispose() {
-    // Cleanup playback provider when leaving screen
-    ref.invalidate(playbackProvider(widget.session));
     super.dispose();
   }
 

@@ -1,6 +1,5 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:just_audio/just_audio.dart';
-import 'dart:developer' as developer;
 import 'dart:async';
 import 'dart:io';
 
@@ -45,7 +44,8 @@ class PlaybackState {
   }
 }
 
-class PlaybackNotifier extends FamilyNotifier<PlaybackState, RecordingSession> {
+class PlaybackNotifier
+  extends AutoDisposeFamilyNotifier<PlaybackState, RecordingSession> {
   late final AudioPlayer _player;
   late StreamSubscription _positionSubscription;
   late StreamSubscription _playerStateSubscription;
@@ -59,8 +59,19 @@ class PlaybackNotifier extends FamilyNotifier<PlaybackState, RecordingSession> {
     });
     
     _playerStateSubscription = _player.playerStateStream.listen((ps) {
+      if (ps.playing) {
+        state = state.copyWith(status: PlaybackStatus.playing);
+        return;
+      }
+
       if (ps.processingState == ProcessingState.completed) {
         state = state.copyWith(status: PlaybackStatus.completed);
+        return;
+      }
+
+      if (ps.processingState != ProcessingState.loading &&
+          state.status == PlaybackStatus.playing) {
+        state = state.copyWith(status: PlaybackStatus.paused);
       }
     });
     
@@ -119,9 +130,13 @@ class PlaybackNotifier extends FamilyNotifier<PlaybackState, RecordingSession> {
 
   Future<void> play() async {
     try {
+      if (state.status == PlaybackStatus.completed) {
+        await _player.seek(Duration.zero);
+      }
+
       print('[Playback] Starting playback');
+      state = state.copyWith(status: PlaybackStatus.playing, error: null);
       await _player.play();
-      state = state.copyWith(status: PlaybackStatus.playing);
     } catch (e) {
       print('[Playback] Error playing: $e');
       state = state.copyWith(
@@ -131,8 +146,8 @@ class PlaybackNotifier extends FamilyNotifier<PlaybackState, RecordingSession> {
   }
 
   Future<void> pause() async {
+    state = state.copyWith(status: PlaybackStatus.paused, error: null);
     await _player.pause();
-    state = state.copyWith(status: PlaybackStatus.paused);
   }
 
   Future<void> seek(Duration position) async {
@@ -141,6 +156,5 @@ class PlaybackNotifier extends FamilyNotifier<PlaybackState, RecordingSession> {
   }
 }
 
-final playbackProvider =
-    NotifierProviderFamily<PlaybackNotifier, PlaybackState, RecordingSession>(
-        PlaybackNotifier.new);
+final playbackProvider = AutoDisposeNotifierProviderFamily<PlaybackNotifier,
+  PlaybackState, RecordingSession>(PlaybackNotifier.new);

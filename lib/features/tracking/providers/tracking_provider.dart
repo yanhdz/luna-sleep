@@ -45,6 +45,7 @@ class TrackingState {
   final TrackingStatus status;
   final RecordingSession? currentSession;
   final double currentAmplitude;
+  final double currentDecibels;
   final List<double> recentAmplitudes; // last N for live waveform
   final Duration elapsed;
   final String? errorMessage;
@@ -53,6 +54,7 @@ class TrackingState {
     this.status = TrackingStatus.idle,
     this.currentSession,
     this.currentAmplitude = 0.0,
+    this.currentDecibels = -60.0,
     this.recentAmplitudes = const [],
     this.elapsed = Duration.zero,
     this.errorMessage,
@@ -62,6 +64,7 @@ class TrackingState {
     TrackingStatus? status,
     RecordingSession? currentSession,
     double? currentAmplitude,
+    double? currentDecibels,
     List<double>? recentAmplitudes,
     Duration? elapsed,
     String? errorMessage,
@@ -70,6 +73,7 @@ class TrackingState {
       status: status ?? this.status,
       currentSession: currentSession ?? this.currentSession,
       currentAmplitude: currentAmplitude ?? this.currentAmplitude,
+      currentDecibels: currentDecibels ?? this.currentDecibels,
       recentAmplitudes: recentAmplitudes ?? this.recentAmplitudes,
       elapsed: elapsed ?? this.elapsed,
       errorMessage: errorMessage,
@@ -82,7 +86,7 @@ class TrackingNotifier extends Notifier<TrackingState> {
   final _repo = RecordingRepository.instance;
   final _uuid = const Uuid();
   Timer? _elapsedTimer;
-  StreamSubscription<double>? _ampSub;
+  StreamSubscription<double>? _dbfsSub;
   StreamSubscription<List<double>>? _listSub;
 
   @override
@@ -106,7 +110,7 @@ class TrackingNotifier extends Notifier<TrackingState> {
         return;
       }
       
-      print('[Permission] Permission not yet granted, requesting now via native channel...');
+      print('[Permission] Permission not yet granted, requesting now...');
       final bool granted = await MicrophonePermissionService.requestMicrophonePermission();
       print('[Permission] Native request completed. Granted: $granted');
 
@@ -131,6 +135,10 @@ class TrackingNotifier extends Notifier<TrackingState> {
 
   Future<void> _startRecordingSession() async {
     try {
+      _elapsedTimer?.cancel();
+      _dbfsSub?.cancel();
+      _listSub?.cancel();
+
       final filePath = await _repo.newAudioFilePath;
       print('[Recording] Got audio file path: $filePath');
 
@@ -149,6 +157,9 @@ class TrackingNotifier extends Notifier<TrackingState> {
       state = state.copyWith(
         status: TrackingStatus.recording,
         currentSession: session,
+        currentAmplitude: 0.0,
+        currentDecibels: -60.0,
+        recentAmplitudes: const [],
         elapsed: Duration.zero,
         errorMessage: null,
       );
@@ -174,7 +185,7 @@ class TrackingNotifier extends Notifier<TrackingState> {
     state = state.copyWith(status: TrackingStatus.processing);
 
     _elapsedTimer?.cancel();
-    _ampSub?.cancel();
+    _dbfsSub?.cancel();
     _listSub?.cancel();
 
     await _recorder.stopRecording();
@@ -199,7 +210,7 @@ class TrackingNotifier extends Notifier<TrackingState> {
     print('[Recording] Session saved to repository');
     print('[Recording] Final audio file path: ${finishedSession.audioFilePath}');
     
-    _recorder.reset();
+    await _recorder.reset();
 
     state = state.copyWith(
       status: TrackingStatus.done,
@@ -210,8 +221,11 @@ class TrackingNotifier extends Notifier<TrackingState> {
 
   void clearError() => state = state.copyWith(errorMessage: null);
 
-  void resetToIdle() {
-    _recorder.reset();
+  Future<void> resetToIdle() async {
+    _elapsedTimer?.cancel();
+    _dbfsSub?.cancel();
+    _listSub?.cancel();
+    await _recorder.reset();
     state = const TrackingState();
   }
 
@@ -224,8 +238,11 @@ class TrackingNotifier extends Notifier<TrackingState> {
   }
 
   void _subscribeToAmplitudes() {
-    _ampSub = _recorder.amplitudeStream.listen((amp) {
-      state = state.copyWith(currentAmplitude: amp);
+    _dbfsSub = _recorder.dbfsStream.listen((dbfs) {
+      state = state.copyWith(
+        currentAmplitude: AmplitudeProcessor.normalize(dbfs),
+        currentDecibels: dbfs,
+      );
     });
 
     _listSub = _recorder.amplitudeListStream.listen((list) {

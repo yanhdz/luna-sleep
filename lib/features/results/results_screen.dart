@@ -47,10 +47,6 @@ class _ResultsScreenState extends ConsumerState<ResultsScreen>
   @override
   void dispose() {
     _tabController.dispose();
-    // Cleanup playback providers when leaving results screen
-    for (final session in widget.sessions) {
-      ref.invalidate(playbackProvider(session));
-    }
     super.dispose();
   }
 

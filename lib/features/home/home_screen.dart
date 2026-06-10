@@ -147,7 +147,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          '${Formatters.greeting()}, Alex',
+          '${Formatters.greeting()}, Cristyan',
           style: Theme.of(context).textTheme.displaySmall?.copyWith(
                 fontWeight: FontWeight.w700,
               ),

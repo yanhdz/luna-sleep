@@ -20,6 +20,7 @@ class TrackingScreen extends ConsumerStatefulWidget {
 class _TrackingScreenState extends ConsumerState<TrackingScreen>
     with SingleTickerProviderStateMixin {
   late AnimationController _pulseController;
+  late final ProviderSubscription<TrackingState> _trackingSubscription;
 
   @override
   void initState() {
@@ -28,10 +29,43 @@ class _TrackingScreenState extends ConsumerState<TrackingScreen>
       vsync: this,
       duration: const Duration(seconds: 2),
     )..repeat(reverse: true);
+
+    _trackingSubscription = ref.listenManual<TrackingState>(
+      trackingProvider,
+      (prev, next) async {
+        if (next.status != TrackingStatus.done || next.currentSession == null) {
+          return;
+        }
+
+        final finishedSession = next.currentSession!;
+        ref.read(sessionsProvider.notifier).reload();
+        await ref.read(trackingProvider.notifier).resetToIdle();
+
+        if (!mounted) return;
+
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ResultsScreen(
+              sessions: [finishedSession],
+              initialIndex: 0,
+            ),
+          ),
+        );
+      },
+    );
+
+    if (ref.read(trackingProvider).status == TrackingStatus.done) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ref.read(trackingProvider.notifier).resetToIdle();
+      });
+    }
   }
 
   @override
   void dispose() {
+    _trackingSubscription.close();
     _pulseController.dispose();
     super.dispose();
   }
@@ -39,22 +73,6 @@ class _TrackingScreenState extends ConsumerState<TrackingScreen>
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(trackingProvider);
-
-    // Navigate to results after stop
-    ref.listen<TrackingState>(trackingProvider, (prev, next) {
-      if (next.status == TrackingStatus.done && next.currentSession != null) {
-        ref.read(sessionsProvider.notifier).reload();
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => ResultsScreen(
-              sessions: [next.currentSession!],
-              initialIndex: 0,
-            ),
-          ),
-        );
-      }
-    });
 
     return Scaffold(
       body: Container(
@@ -238,7 +256,7 @@ class _TrackingScreenState extends ConsumerState<TrackingScreen>
   }
 
   Widget _buildRecordingView(BuildContext context, TrackingState state) {
-    final dbValue = (state.currentAmplitude * 60).toStringAsFixed(0);
+    final dbValue = state.currentDecibels.toStringAsFixed(0);
     return Column(
       children: [
         const SizedBox(height: 24),
@@ -338,6 +356,7 @@ class _TrackingScreenState extends ConsumerState<TrackingScreen>
               child: _DbMeterCard(
                 label: 'CURRENT',
                 value: state.currentAmplitude,
+                decibels: state.currentDecibels,
                 color: _dbColor(state.currentAmplitude),
               ),
             ),
@@ -479,11 +498,13 @@ class _WaveformCustomPainter extends CustomPainter {
 class _DbMeterCard extends StatelessWidget {
   final String label;
   final double value; // 0..1
+  final double decibels;
   final Color color;
 
   const _DbMeterCard({
     required this.label,
     required this.value,
+    required this.decibels,
     required this.color,
   });
 
@@ -511,7 +532,7 @@ class _DbMeterCard extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           Text(
-            '${(value * 60).toStringAsFixed(0)} dB',
+            '${decibels.toStringAsFixed(0)} dB',
             style: Theme.of(context)
                 .textTheme
                 .titleMedium

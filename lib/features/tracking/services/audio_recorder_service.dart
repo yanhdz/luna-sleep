@@ -6,7 +6,6 @@ import 'package:record/record.dart';
 
 import '../../../core/constants/app_constants.dart';
 import '../../../core/utils/amplitude_processor.dart';
-import '../../../core/services/audio_amplitude_service.dart';
 
 enum RecorderStatus { idle, recording, stopped }
 
@@ -14,30 +13,39 @@ class AudioRecorderService {
   AudioRecorderService._();
   static final AudioRecorderService instance = AudioRecorderService._();
 
-  final AudioRecorder _recorder = AudioRecorder();
+  AudioRecorder? _recorder;
   RecorderStatus _status = RecorderStatus.idle;
   String? _currentFilePath;
 
   final List<double> _amplitudes = [];
+  final _dbfsController = StreamController<double>.broadcast();
   final _amplitudeController = StreamController<double>.broadcast();
   final _amplitudeListController =
       StreamController<List<double>>.broadcast();
 
-  StreamSubscription<double>? _amplitudeStreamSubscription;
+  StreamSubscription<Amplitude>? _amplitudeStreamSubscription;
 
   RecorderStatus get status => _status;
   List<double> get amplitudes => List.unmodifiable(_amplitudes);
+  Stream<double> get dbfsStream => _dbfsController.stream;
   Stream<double> get amplitudeStream => _amplitudeController.stream;
   Stream<List<double>> get amplitudeListStream =>
       _amplitudeListController.stream;
 
-  Future<bool> hasPermission() => _recorder.hasPermission();
+  AudioRecorder get _activeRecorder => _recorder ??= AudioRecorder();
+
+  Future<bool> hasPermission() => _activeRecorder.hasPermission();
 
   Future<void> startRecording(String filePath) async {
     if (_status == RecorderStatus.recording) {
       print('[AudioRecorder] Already recording, ignoring start request');
       return;
     }
+
+    await _cancelAmplitudeSubscription();
+    await _disposeRecorder();
+    _recorder = AudioRecorder();
+    final recorder = _recorder!;
 
     _currentFilePath = filePath;
     _amplitudes.clear();
@@ -53,7 +61,7 @@ class AudioRecorderService {
       print('[AudioRecorder] Directory exists: ${await dir.exists()}');
       
       print('[AudioRecorder] Starting recording with config: AAC-LC, 64kbps, 44.1kHz, Mono');
-      await _recorder.start(
+      await recorder.start(
         const RecordConfig(
           encoder: AudioEncoder.aacLc,
           bitRate: 64000,
@@ -65,13 +73,10 @@ class AudioRecorderService {
       print('[AudioRecorder] Recording started successfully');
       print('[AudioRecorder] File path stored: $_currentFilePath');
       _status = RecorderStatus.recording;
-      
-      // Start listening to native amplitude stream
-      await AudioAmplitudeService.startListening();
-      _subscribeToAmplitudeStream();
+
+      _subscribeToAmplitudeStream(recorder);
     } catch (e) {
       print('[AudioRecorder] Error starting recording: $e');
-      await AudioAmplitudeService.stopListening();
       rethrow;
     }
   }
@@ -84,12 +89,15 @@ class AudioRecorderService {
     
     print('[AudioRecorder] ========== STOPPING RECORDING ==========');
     print('[AudioRecorder] Stopping recording...');
-    _amplitudeStreamSubscription?.cancel();
-    _amplitudeStreamSubscription = null;
+    final recorder = _recorder;
+    if (recorder == null) {
+      _status = RecorderStatus.stopped;
+      return _currentFilePath;
+    }
+    await _cancelAmplitudeSubscription();
     
     try {
-      await AudioAmplitudeService.stopListening();
-      final path = await _recorder.stop();
+      final path = await recorder.stop();
       final finalPath = path ?? _currentFilePath;
       
       print('[AudioRecorder] Recording stopped. Returned path: $path');
@@ -117,31 +125,50 @@ class AudioRecorderService {
   }
 
   Future<void> dispose() async {
-    _amplitudeStreamSubscription?.cancel();
-    await _recorder.dispose();
+    await _cancelAmplitudeSubscription();
+    await _disposeRecorder();
+    await _dbfsController.close();
     await _amplitudeController.close();
     await _amplitudeListController.close();
-    await AudioAmplitudeService.dispose();
   }
 
-  void reset() {
+  Future<void> reset() async {
     _amplitudes.clear();
-    _amplitudeStreamSubscription?.cancel();
-    _amplitudeStreamSubscription = null;
+    await _cancelAmplitudeSubscription();
+    await _disposeRecorder();
+    _currentFilePath = null;
     _status = RecorderStatus.idle;
   }
 
-  void _subscribeToAmplitudeStream() {
+  Future<void> _cancelAmplitudeSubscription() async {
+    await _amplitudeStreamSubscription?.cancel();
+    _amplitudeStreamSubscription = null;
+  }
+
+  Future<void> _disposeRecorder() async {
+    await _recorder?.dispose();
+    _recorder = null;
+  }
+
+  void _subscribeToAmplitudeStream(AudioRecorder recorder) {
     developer.log('[AudioRecorder] Subscribing to amplitude stream');
     
-    _amplitudeStreamSubscription = AudioAmplitudeService.amplitudeStream.listen(
-      (dbfs) {
-        if (_status != RecorderStatus.recording) return;
+    _amplitudeStreamSubscription = recorder
+        .onAmplitudeChanged(
+          const Duration(milliseconds: AppConstants.amplitudeSampleRateMs),
+        )
+        .listen(
+      (amplitude) {
+        if (_status != RecorderStatus.recording || !identical(_recorder, recorder)) {
+          return;
+        }
         
         try {
+          final dbfs = amplitude.current;
           developer.log('[AudioRecorder] Amplitude: $dbfs dBFS');
           final normalized = AmplitudeProcessor.normalize(dbfs);
           
+          _dbfsController.add(dbfs);
           _amplitudes.add(normalized);
           if (_amplitudes.length > AppConstants.waveformHistoryMax) {
             _amplitudes.removeAt(0);
